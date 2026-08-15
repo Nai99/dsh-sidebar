@@ -1,0 +1,4 @@
+# dsh-sidebar bundle patch —— 右侧文件工作台
+- insert:
+    - id: sidebar
+      name: 'dsh-sidebar'
