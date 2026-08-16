@@ -10,7 +10,7 @@ process.on('uncaughtException', (e) => {
 })
 
 const src = readFileSync('lib/client.js', 'utf8')
-const patched = src.replace('return module.exports; } });', 'return { panel: SidebarPanel }; } });')
+const patched = src.replace('return module.exports; } });', 'return { panel: SidebarPanel, i18nMap: typeof MONACO_MENU_I18N !== "undefined" ? MONACO_MENU_I18N : null, nls: typeof MONACO_NLS !== "undefined" ? MONACO_NLS : null }; } });')
 
 const ok = (cond, msg) => { console.log((cond ? 'ok  ' : 'FAIL') + ' ' + msg); if (!cond) process.exitCode = 1 }
 
@@ -59,6 +59,8 @@ function loadBundle(firstSeed, secondSeed) {
     head: { appendChild: () => {} },
     createElement: () => ({ style: {} }),
     getElementById: () => null,
+    querySelector: () => null,
+    querySelectorAll: () => [],
     addEventListener: () => {},
     removeEventListener: () => {},
   }
@@ -110,7 +112,7 @@ function loadBundle(firstSeed, secondSeed) {
   const cleanups = effects.map((f) => f()).filter(Boolean)
   return {
     mqListeners, winListeners, observerInsts, observed, defines, themeCalls, langCalls, cleanups,
-    fakeEditor, documentStub, refs: refPool,
+    fakeEditor, documentStub, refs: refPool, i18nMap: exported.i18nMap, nls: exported.nls,
     getMqRemoved: () => mqRemoved,
     getObserverDisconnected: () => observerDisconnected,
   }
@@ -173,6 +175,81 @@ function loadBundle(firstSeed, secondSeed) {
   await new Promise((r) => setTimeout(r, 250))
   ok(h.langCalls.every((l) => l !== 'plaintext'), '主题刷新未重置语言: ' + JSON.stringify(h.langCalls))
   ok(h.langCalls.filter((l) => l === 'javascript').length >= 2, '主题刷新后语言仍为 javascript')
+}
+
+// ============ 场景 3:编辑器右键菜单中文化(nls 注入 + DOM 兜底文案) ============
+{
+  const h = loadBundle({ 0: true })
+  // nls 注入:localize/localize2 按数字 id 查 _VSCODE_NLS_MESSAGES(与内置 monaco 实际 id 校准)
+  const nlsPairs = [
+    [63, 'Undo'], [65, 'Redo'], [67, 'Select All'], [701, 'Command Palette'], [726, 'Cut'], [730, 'Copy'], [734, 'Paste'],
+    [922, 'Format Document'], [973, 'Go to Definition'], [975, 'Peek Definition'], [976, 'Go to Declaration'], [977, 'Peek Declaration'],
+    [978, 'Go to Type Definition'], [979, 'Peek Type Definition'], [980, 'Go to Implementations'], [981, 'Peek Implementations'],
+    [1167, 'Change All Occurrences'], [1204, 'Open to the Side'], [1242, 'Rename Symbol'],
+  ]
+  const nlsMissing = nlsPairs.filter(([id]) => !h.nls || typeof h.nls[id] !== 'string' || h.nls[id].length === 0)
+  ok(nlsMissing.length === 0, 'nls 注入覆盖全部菜单项 id: ' + (nlsMissing.length ? nlsMissing.map(([id]) => id).join(',') : (nlsPairs.length + ' 项')))
+  ok(h.nls && h.nls[973] === '转到定义', 'nls: Go to Definition(973) → 转到定义')
+  ok(h.nls && h.nls[726] === '剪切', 'nls: Cut(726) → 剪切')
+  // 模拟 monaco 的 localize 查找逻辑,验证注入后返回中文
+  const lookup = (id, fallback) => { const n = (h.nls || {})[id]; return typeof n === 'string' ? n : fallback }
+  ok(lookup(973, 'Go to Definition') === '转到定义', 'localize 查找逻辑返回中文')
+  // DOM 兜底文案(覆盖 nls 之外的条目)
+  const map = h.i18nMap
+  const verified = ['Cut', 'Copy', 'Paste', 'Select All', 'Command Palette', 'Undo', 'Redo',
+    'Go to Definition', 'Peek Definition', 'Go to Declaration', 'Go to Type Definition', 'Go to Implementation',
+    'Peek Type Definition', 'Peek Implementation', 'Peek Declaration',
+    'Change All Occurrences', 'Rename Symbol', 'Format Document', 'Open to the Side']
+  const missing = verified.filter((k) => !map || typeof map[k] !== 'string' || map[k].length === 0)
+  ok(missing.length === 0, 'DOM 兜底文案覆盖全部实际菜单项: ' + (missing.length ? missing.join(', ') : (Object.keys(map).length + ' 项')))
+}
+
+// ============ 场景 4:nls 注入与内置 monaco 的 localize 集成验证 ============
+{
+  // 从 monaco 构建中提取 nls 模块(ne[345]=messages 读取,ne[3]=localize),用最小 AMD shim 执行
+  const monacoSrc = readFileSync(new URL('../lib/monaco/vs/editor/editor.main.js', import.meta.url), 'utf8')
+  function extractDefine(anchor) {
+    const start = monacoSrc.indexOf(anchor)
+    if (start < 0) return null
+    let depth = 0
+    for (let i = start; i < monacoSrc.length; i++) {
+      const c = monacoSrc[i]
+      if (c === '(') depth++
+      else if (c === ')') { depth--; if (depth === 0) return monacoSrc.slice(start, i + 1) }
+    }
+    return null
+  }
+  const def345 = extractDefine('define(ne[345],')
+  const def3 = extractDefine('define(ne[3],')
+  ok(def345 && def3, 'monaco nls 模块定义提取成功')
+  if (def345 && def3) {
+    const modules = {}
+    const define = (id, deps, factory) => { modules[id] = { deps, factory } }
+    const vm = await import('node:vm')
+    const ctx = vm.createContext({ define, ne: { 3: 3, 345: 345 }, se: (x) => x, globalThis: null })
+    ctx.globalThis = ctx
+    ctx._VSCODE_NLS_MESSAGES = { 973: '转到定义', 726: '剪切' }
+    vm.runInContext(def345, ctx)
+    vm.runInContext(def3, ctx)
+    const builtins = (name) => (name === 'exports' ? {} : undefined)
+    const requireMod = (id) => {
+      const mod = modules[id]
+      if (!mod) throw new Error('missing module ' + id)
+      const exports = {}
+      // monaco 构建约定:依赖数组里 1=require, 0=exports, 其它为模块 id
+      const args = mod.deps.map((dep) => {
+        if (dep === 1) return (req) => requireMod(req)
+        if (dep === 0) return exports
+        return requireMod(dep)
+      })
+      mod.factory(...args)
+      return exports
+    }
+    const nls = requireMod('3')
+    ok(nls.localize(973, 'Go to Definition') === '转到定义', '真实 monaco localize 返回中文(973)')
+    ok(nls.localize2(973, 'Go to Definition').value === '转到定义', '真实 monaco localize2 返回中文(973)')
+    ok(nls.localize(99999, 'Unknown') === 'Unknown', '未注入的 id 回退英文')
+  }
 }
 
 console.log(process.exitCode ? 'THEME/HIGHLIGHT TEST FAILED' : 'THEME/HIGHLIGHT TEST PASSED')
