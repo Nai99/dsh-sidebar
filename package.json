@@ -13,6 +13,10 @@
     "lib",
     "cordis.patch.yml"
   ],
+  "scripts": {
+    "build": "node scripts/build-client.mjs",
+    "test": "node scripts/test-server.mjs && node scripts/test-client-render.mjs && node scripts/test-client-theme.mjs && node scripts/test-terminal.mjs"
+  },
   "license": "MIT",
   "dsh": {
     "client": {
